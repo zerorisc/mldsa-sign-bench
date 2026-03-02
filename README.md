@@ -10,6 +10,9 @@ If you just want to use the test data, the `testsets` folder has a bunch of outp
 For example, `testsets/mldsa44_10.json` has a set of 10 inputs for ML-DSA-44 signing that together have a signing time profile close to average.
 The more tests you use, the higher the accuracy.
 
+The `.rsp` files there contain exactly the same test inputs as the `.json` ones, but they're designed to match the NIST known-answer test formats.
+If your test infrastructure is already built to handle NIST-style `.rsp` files, you might find it easier to use those than the JSON.
+
 ## Generating test sets
 
 If you want to generate your own alternative test sets, or re-generate the ones here with different parameters, you'll need to run some local scripts.

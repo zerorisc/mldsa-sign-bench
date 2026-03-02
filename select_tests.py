@@ -142,7 +142,7 @@ def write_sample_rsp(params, sample, dst):
   '''Write sample test vectors to a file in NIST .rsp form.'''
   for i in range(len(sample)):
     t = sample[i]
-    for field in ['mlen', 'msg', 'rnd', 'sk']:
+    for field in ['mlen', 'msg', 'rnd', 'sk', 'smlen', 'sm']:
       value = t[field]
       if isinstance(value, bytes):
         value = value.hex()
