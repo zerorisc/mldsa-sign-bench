@@ -4,7 +4,7 @@ Accurately benchmarking ML-DSA signatures is hard, at least if you don't want to
 But it doesn't have to be!
 These scripts select specific ML-DSA signing inputs (message, randomness input, and secret key) that will have performance profiles close to average.
 
-## Basic Usage
+## Basic usage
 
 If you just want to use the test data, the `testsets` folder has a bunch of outputs for different sizes of test sets that you can use to estimate average ML-DSA signing performance.
 For example, `testsets/mldsa44_10.json` has a set of 10 inputs for ML-DSA-44 signing that together have a signing time profile close to average.
