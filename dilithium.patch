@@ -1,0 +1,225 @@
+diff --git a/ref/nistkat/PQCgenKAT_sign.c b/ref/nistkat/PQCgenKAT_sign.c
+index 005ce41..1814ee0 100644
+--- a/ref/nistkat/PQCgenKAT_sign.c
++++ b/ref/nistkat/PQCgenKAT_sign.c
+@@ -29,10 +29,11 @@ main()
+     char                fn_req[32], fn_rsp[32];
+     FILE                *fp_req, *fp_rsp;
+     uint8_t             seed[48];
++    uint8_t             rnd[RNDBYTES];
+     uint8_t             msg[3300];
+     uint8_t             entropy_input[48];
+-    uint8_t             *m, *sm, *m1;
+-    size_t              mlen, smlen, mlen1;
++    uint8_t             *m, *sm, *m1, *iter;
++    size_t              mlen, smlen, mlen1, iterlen;
+     int                 count;
+     int                 done;
+     uint8_t             pk[CRYPTO_PUBLICKEYBYTES], sk[CRYPTO_SECRETKEYBYTES];
+@@ -54,14 +55,19 @@ main()
+         entropy_input[i] = i;
+ 
+     randombytes_init(entropy_input, NULL, 256);
+-    for (int i=0; i<100; i++) {
++
++    // seed and message are held constant
++    randombytes(seed, 48);
++    mlen = 32;
++    randombytes(msg, mlen);
++
++    for (int i=0; i<100000; i++) {
+         fprintf(fp_req, "count = %d\n", i);
+-        randombytes(seed, 48);
+         fprintBstr(fp_req, "seed = ", seed, 48);
+-        mlen = 33*(i+1);
+         fprintf(fp_req, "mlen = %lu\n", mlen);
+-        randombytes(msg, mlen);
+         fprintBstr(fp_req, "msg = ", msg, mlen);
++        randombytes(rnd, RNDBYTES);
++        fprintBstr(fp_req, "rnd = ", rnd, RNDBYTES);
+         fprintf(fp_req, "pk =\n");
+         fprintf(fp_req, "sk =\n");
+         fprintf(fp_req, "smlen =\n");
+@@ -106,12 +112,23 @@ main()
+         m1 = (uint8_t *)calloc(mlen+CRYPTO_BYTES, sizeof(uint8_t));
+         sm = (uint8_t *)calloc(mlen+CRYPTO_BYTES, sizeof(uint8_t));
+ 
++        // Allocate space for the iteration record. The odds of needing more
++        // than 256 iterations are ~2^(-78) for ML-DSA-65 (the parameter set
++        // with the highest chance of rejection); negligible in practice.
++        iter = (uint8_t *)calloc(256, sizeof(uint8_t));
++
+         if ( !ReadHex(fp_req, m, (int)mlen, "msg = ") ) {
+             printf("ERROR: unable to read 'msg' from <%s>\n", fn_req);
+             return KAT_DATA_ERROR;
+         }
+         fprintBstr(fp_rsp, "msg = ", m, mlen);
+ 
++        if ( !ReadHex(fp_req, rnd, RNDBYTES, "rnd = ") ) {
++            printf("ERROR: unable to read 'rnd' from <%s>\n", fn_req);
++            return KAT_DATA_ERROR;
++        }
++        fprintBstr(fp_rsp, "rnd = ", rnd, RNDBYTES);
++
+         // Generate the public/private keypair
+         if ( (ret_val = crypto_sign_keypair(pk, sk)) != 0) {
+             printf("crypto_sign_keypair returned <%d>\n", ret_val);
+@@ -120,12 +137,27 @@ main()
+         fprintBstr(fp_rsp, "pk = ", pk, CRYPTO_PUBLICKEYBYTES);
+         fprintBstr(fp_rsp, "sk = ", sk, CRYPTO_SECRETKEYBYTES);
+ 
+-        if ( (ret_val = crypto_sign(sm, &smlen, m, mlen, NULL, 0, sk)) != 0) {
++        // Because we're using the internal signing API, compute the message
++        // prefix and do some bookkeeping around the signature/message
++        // combination. Context is always empty.
++        for(size_t i = 0; i < mlen; ++i)
++          sm[CRYPTO_BYTES + mlen - 1 - i] = m[mlen - 1 - i];
++        uint8_t pre[2];
++        pre[0] = 0;
++        pre[1] = 0;
++        if ( (ret_val = crypto_sign_signature_internal(sm,&smlen,iter,&iterlen,m,mlen,pre,2,rnd,sk)) != 0) {
+             printf("crypto_sign returned <%d>\n", ret_val);
+             return KAT_CRYPTO_FAILURE;
+         }
++        smlen += mlen;
+         fprintf(fp_rsp, "smlen = %lu\n", smlen);
+         fprintBstr(fp_rsp, "sm = ", sm, smlen);
++        fprintf(fp_rsp, "iterlen = %lu\n", iterlen);
++        if (iterlen > 0) {
++          fprintBstr(fp_rsp, "iter = ", iter, iterlen);
++        } else {
++          fprintf(fp_rsp, "iter =");
++        }
+         fprintf(fp_rsp, "\n");
+ 
+         if ( (ret_val = crypto_sign_open(m1, &mlen1, sm, smlen, NULL, 0, pk)) != 0) {
+@@ -146,6 +178,7 @@ main()
+         free(m);
+         free(m1);
+         free(sm);
++        free(iter);
+ 
+     } while ( !done );
+ 
+diff --git a/ref/sign.c b/ref/sign.c
+index 7d3f882..30b72fc 100644
+--- a/ref/sign.c
++++ b/ref/sign.c
+@@ -71,8 +71,18 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
+ *
+ * Description: Computes signature. Internal API.
+ *
++* The iteration record is a sequence of bytes where each byte represents an
++* rejected iteration of the sign loop. If the pointer is NULL, no iteration
++* record is created. The byte indicates why the signature was rejected:
++*   - 0: z failed chknorm
++*   - 1: w0 failed chknorm
++*   - 2: ct0 failed chknorm
++*   - 3: h failed chknorm
++*
+ * Arguments:   - uint8_t *sig:   pointer to output signature (of length CRYPTO_BYTES)
+ *              - size_t *siglen: pointer to output length of signature
++*              - uint8_t *iter:  pointer to iteration record
++*              - size_t *iterlen: pointer to length of iteration record
+ *              - uint8_t *m:     pointer to message to be signed
+ *              - size_t mlen:    length of message
+ *              - uint8_t *pre:   pointer to prefix string
+@@ -84,6 +94,8 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
+ **************************************************/
+ int crypto_sign_signature_internal(uint8_t *sig,
+                                    size_t *siglen,
++                                   uint8_t *iter,
++                                   size_t *iterlen,
+                                    const uint8_t *m,
+                                    size_t mlen,
+                                    const uint8_t *pre,
+@@ -95,6 +107,9 @@ int crypto_sign_signature_internal(uint8_t *sig,
+   uint8_t seedbuf[2*SEEDBYTES + TRBYTES + 2*CRHBYTES];
+   uint8_t *rho, *tr, *key, *mu, *rhoprime;
+   uint16_t nonce = 0;
++  if (iter != NULL) {
++     *iterlen = 0;
++  }
+   polyvecl mat[K], s1, y, z;
+   polyveck t0, s2, w1, w0, h;
+   poly cp;
+@@ -158,8 +173,14 @@ rej:
+   polyvecl_invntt_tomont(&z);
+   polyvecl_add(&z, &z, &y);
+   polyvecl_reduce(&z);
+-  if(polyvecl_chknorm(&z, GAMMA1 - BETA))
++  if(polyvecl_chknorm(&z, GAMMA1 - BETA)) {
++    if (iter != NULL) {
++      iter[0] = 0;
++      iter++;
++      (*iterlen)++;
++    }
+     goto rej;
++  }
+ 
+   /* Check that subtracting cs2 does not change high bits of w and low bits
+    * do not reveal secret information */
+@@ -167,20 +188,38 @@ rej:
+   polyveck_invntt_tomont(&h);
+   polyveck_sub(&w0, &w0, &h);
+   polyveck_reduce(&w0);
+-  if(polyveck_chknorm(&w0, GAMMA2 - BETA))
++  if(polyveck_chknorm(&w0, GAMMA2 - BETA)) {
++    if (iter != NULL) {
++      iter[0] = 1;
++      iter++;
++      (*iterlen)++;
++    }
+     goto rej;
++  }
+ 
+   /* Compute hints for w1 */
+   polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
+   polyveck_invntt_tomont(&h);
+   polyveck_reduce(&h);
+-  if(polyveck_chknorm(&h, GAMMA2))
++  if(polyveck_chknorm(&h, GAMMA2)) {
++    if (iter != NULL) {
++      iter[0] = 2;
++      iter++;
++      (*iterlen)++;
++    }
+     goto rej;
++  }
+ 
+   polyveck_add(&w0, &w0, &h);
+   n = polyveck_make_hint(&h, &w0, &w1);
+-  if(n > OMEGA)
++  if(n > OMEGA) {
++    if (iter != NULL) {
++      iter[0] = 3;
++      iter++;
++      (*iterlen)++;
++    }
+     goto rej;
++  }
+ 
+   /* Write signature */
+   pack_sig(sig, sig, &z, &h);
+@@ -231,7 +270,7 @@ int crypto_sign_signature(uint8_t *sig,
+     rnd[i] = 0;
+ #endif
+ 
+-  crypto_sign_signature_internal(sig,siglen,m,mlen,pre,2+ctxlen,rnd,sk);
++  crypto_sign_signature_internal(sig,siglen,NULL,NULL,m,mlen,pre,2+ctxlen,rnd,sk);
+   return 0;
+ }
+ 
+diff --git a/ref/sign.h b/ref/sign.h
+index 2741e8f..7e54474 100644
+--- a/ref/sign.h
++++ b/ref/sign.h
+@@ -13,6 +13,8 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk);
+ #define crypto_sign_signature_internal DILITHIUM_NAMESPACE(signature_internal)
+ int crypto_sign_signature_internal(uint8_t *sig,
+                                    size_t *siglen,
++                                   uint8_t *iter,
++                                   size_t *iterlen,
+                                    const uint8_t *m,
+                                    size_t mlen,
+                                    const uint8_t *pre,
