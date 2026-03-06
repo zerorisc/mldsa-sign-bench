@@ -15,11 +15,11 @@ class Params(Enum):
 # Termination conditions for sign loop iterations. Note: Checks must appear in
 # the order they are checked in the algorithm!
 class Iteration(Enum):
-  Z = auto()
-  R0 = auto()
-  CT0 = auto()
-  H = auto()
-  PASS = auto()
+  Z = 0
+  R0 = 1
+  CT0 = 2
+  H = 3
+  PASS = 4
 
 # ML-DSA constants
 N = 256
@@ -148,11 +148,6 @@ def write_sample_rsp(params, sample, dst):
         value = value.hex()
       dst.write(f'{field} = {value}\n')
 
-def kl_divergence(p, q):
-  '''Computes Kullback-Leibler divergence (aka relative entropy) of the
-     observation Q from the true distrubution P.'''
-  return sum([math.log(p[x] / q[x]) for x in p])
-
 def incorporate_testvec(passes, fails, testvec):
   '''Helper for distance_from_ideal.'''
   failed_check_lookup = {
@@ -183,13 +178,11 @@ def distance(ideal, sample, verbose=False):
   actual = {c.name: passes[c.name] / (passes[c.name] + fails[c.name]) for c in Iteration}
   if verbose:
       print('actual:', actual)
-  # return abs(kl_divergence(ideal, pass_rates))
   return sum([abs(ideal[c.name] - actual[c.name]) for c in Iteration])
 
-def get_sample(params, n, testvecs):
+def get_sample(params, n, testvecs, ideal):
   '''Greedy algorithm that clusters the data and picks the datapoint in each
      cluster that brings it closest to the goal at the moment.'''
-  ideal = {check.name: pass_chance(params, check) for check in Iteration}
   sample = []
   cluster_size = len(testvecs) // n
   if cluster_size <= 2:
@@ -217,6 +210,54 @@ def check_params(params, testvecs):
     if len(t['sk']) != sklen:
       raise ValueError(f'Key length {len(t["sk"])} in testvec does not match parameters!')
 
+
+def get_percentile_ideal(params, percentile):
+  '''Get a performance profile that corresponds to a specific percentile.
+
+  Can be used to get test sets that estimate the median (50%) or specific
+  points like 95th percentile latency for better estimates of cases that need
+  strong eventual guarantees.
+
+
+  Relies on some assumptions about the performance of checks relative to one
+  another; may not translate well across different implementations.
+  '''
+  assert 0 <= percentile < 100
+
+  pass_rates = {check: pass_chance(params, check) for check in Iteration}
+
+  # keep simulating traces, shortest first, until the target percentile is reached.
+  proportion_done = 0.0
+  queue = [(Iteration.Z, [], [], 1.0)]
+  while len(queue) > 0:
+    next_check, trace, rejections, prob = queue.pop(0)
+    if next_check == Iteration.PASS:
+      proportion_done += prob
+      if proportion_done * 100 >= percentile:
+        ideal = {}
+        for check in Iteration:
+          if check == Iteration.PASS:
+            ideal[check.name] = 1.0
+          else:
+            ideal[check.name] = 1.0 - (rejections.count(check) / trace.count(check))
+        print(trace)
+        return ideal
+      continue
+    # enqueue the passed case
+    passed_next_check = Iteration((next_check.value + 1) % len(Iteration))
+    passed_prob = pass_rates[next_check]
+    queue.append((passed_next_check, trace + [next_check], rejections, prob * passed_prob))
+    # enqueue the failed case
+    failed_prob =  1.0 - passed_prob
+    queue.append((Iteration.Z, trace + [next_check], rejections + [next_check], prob * failed_prob))
+
+    # timing assumption: Z >> R0 >> CT0 >> H (same as check order!)
+    # Z >> R is reliably true for memory-optimized implementations since it
+    # includes A expansion; CT0 and H matter less because they fail so rarely
+    queue.sort(key=lambda x: (x[0].value, -x[1].count(Iteration.Z)), reverse=True)
+
+  raise RuntimeError('Should not get here!')
+
 if __name__ == '__main__':
   param_lookup = {x.name.lower(): x for x in Params}
   parser = argparse.ArgumentParser(description='Sample synthetic test data for ML-DSA.')
@@ -230,6 +271,8 @@ if __name__ == '__main__':
                       'of JSON.')
   parser.add_argument('--params', type=str,
                       help=f'ML-DSA parameters (options: {list(param_lookup.keys())}).')
+  parser.add_argument('--percentile', required=False, type=int,
+                      help=f'Percentile to target (1-99).')
   parser.add_argument('--deterministic', required=False, action='store_true',
                       help=f'Sample deterministically instead of pseudo-randomly.')
   parser.add_argument('--verbose', required=False, action='store_true')
@@ -249,10 +292,17 @@ if __name__ == '__main__':
   if not args.deterministic:
     random.shuffle(testvecs)
 
-  sample = get_sample(params, args.ntests, testvecs)
+  if args.percentile is not None:
+    if not 0 < args.percentile < 100:
+        raise ValueError(f"invalid percentile {args.percentile}: (must be in range 1-99)")
+    ideal = get_percentile_ideal(params, args.percentile)
+  else:
+    # aim for mean
+    ideal = {check.name: pass_chance(params, check) for check in Iteration}
+
+  sample = get_sample(params, args.ntests, testvecs, ideal)
   if args.verbose:
     print('selected tests:', sorted([t['count'] for t in sample]))
-    ideal = {check.name: pass_chance(params, check) for check in Iteration}
     print('ideal:', ideal)
     print('distance from ideal:', distance(ideal, sample, verbose=True))
 
