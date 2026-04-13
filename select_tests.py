@@ -240,7 +240,6 @@ def get_percentile_ideal(params, percentile):
             ideal[check.name] = 1.0
           else:
             ideal[check.name] = 1.0 - (rejections.count(check) / trace.count(check))
-        print(trace)
         return ideal
       continue
     # enqueue the passed case
