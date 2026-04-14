@@ -2,7 +2,10 @@
 
 Accurately benchmarking ML-DSA signatures is hard, at least if you don't want to run huge numbers of tests.
 But it doesn't have to be!
-These scripts select specific ML-DSA signing inputs (message, randomness input, and secret key) that will have performance profiles close to average.
+These scripts select specific ML-DSA signing inputs (message, randomness input, and secret key) that will have performance profiles close to average, or to a target percentile.
+
+Note: the percentile support is less well-tested than the mean and makes some timing assumptions that might not translate across all implementations.
+Ideally, test these against a large benchmark set for your implementation first before relying on them.
 
 ## Basic usage
 
