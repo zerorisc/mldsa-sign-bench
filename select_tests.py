@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 import argparse
+import itertools
 import json
 import math
 import random
@@ -218,42 +219,64 @@ def get_percentile_ideal(params, percentile):
   points like 95th percentile latency for better estimates of cases that need
   strong eventual guarantees.
 
-
-  Relies on some assumptions about the performance of checks relative to one
-  another; may not translate well across different implementations.
+  TIMING ASSUMPTION: assumes that the first stage of the loop (before the z
+  check) takes more time than the rest of the loop before the last check; this
+  assumption may not translate across all implementations.
   '''
   assert 0 <= percentile < 100
 
   pass_rates = {check: pass_chance(params, check) for check in Iteration}
 
-  # keep simulating traces, shortest first, until the target percentile is reached.
-  proportion_done = 0.0
-  queue = [(Iteration.Z, [], [], 1.0)]
-  while len(queue) > 0:
-    next_check, trace, rejections, prob = queue.pop(0)
-    if next_check == Iteration.PASS:
-      proportion_done += prob
-      if proportion_done * 100 >= percentile:
+  # get the total chance that a signature will be rejected during a loop
+  # iteration, and the chance that a signature that reaches a given iteration
+  # will stop at each check.
+  iter_pass_chance = 1
+  stop_chance_by_check = {}
+  for check, pass_rate in pass_rates.items():
+    if check != Iteration.PASS:
+      stop_chance_by_check[check] = iter_pass_chance * (1 - pass_rate)
+    iter_pass_chance *= pass_rate
+  iter_rej_chance = 1 - iter_pass_chance
+
+  # figure out the total number of signing loop rejections for the target
+  # percentile; based on our timing assumption, the first check dominates the
+  # profile, so all paths through n iterations are strictly shorter than paths
+  # through n+1 iterations.
+  total_rejections = 0
+  while True:
+    total_rejections += 1
+    chance_accepted = 1 - pow(iter_rej_chance, total_rejections)
+    if chance_accepted * 100 > percentile:
+      # passed the target, backtrack and end
+      total_rejections -= 1
+      break
+
+  # now figure out the exact pattern of rejections for the signature at the
+  # target percentile, by analyzing possible (unordered) combinations of
+  # rejections shortest-first.
+  combinations = itertools.combinations_with_replacement(stop_chance_by_check.keys(), total_rejections)
+  chance_accepted = 1 - pow(iter_rej_chance, total_rejections)
+  for comb in combinations:
+    # get the total probability of this specific path (ending in a pass)
+    path_prob = math.prod([stop_chance_by_check[check] for check in comb]) * iter_pass_chance
+    # get the total number of distinct orderings that are possible, which gives
+    # the number of paths for this combination, see:
+    # https://en.wikipedia.org/wiki/Permutation#Permutations_of_multisets
+    freq = [list(comb).count(check) for check in stop_chance_by_check.keys() if check in comb]
+    num_orderings = math.factorial(len(list(comb))) // math.prod([math.factorial(n) for n in freq]) 
+    # multiply to get the total probability of this combination
+    chance_accepted += num_orderings * path_prob
+    # if we passed the target, return the pass rates for this profile
+    if chance_accepted * 100 > percentile:
         ideal = {}
         for check in Iteration:
           if check == Iteration.PASS:
             ideal[check.name] = 1.0
-          else:
-            ideal[check.name] = 1.0 - (rejections.count(check) / trace.count(check))
+            continue
+          passes = len([c for c in comb if c.value > check.value]) + 1
+          fails = len([c for c in comb if c == check])
+          ideal[check.name] = passes / (passes + fails)
         return ideal
-      continue
-    # enqueue the passed case
-    passed_next_check = Iteration((next_check.value + 1) % len(Iteration))
-    passed_prob = pass_rates[next_check]
-    queue.append((passed_next_check, trace + [next_check], rejections, prob * passed_prob))
-    # enqueue the failed case
-    failed_prob =  1.0 - passed_prob
-    queue.append((Iteration.Z, trace + [next_check], rejections + [next_check], prob * failed_prob))
-
-    # timing assumption: Z >> R0 >> CT0 >> H (same as check order!)
-    # Z >> R is reliably true for memory-optimized implementations since it
-    # includes A expansion; CT0 and H matter less because they fail so rarely
-    queue.sort(key=lambda x: (x[0].value, -x[1].count(Iteration.Z)), reverse=True)
 
   raise RuntimeError('Should not get here!')
 
@@ -271,7 +294,9 @@ if __name__ == '__main__':
   parser.add_argument('--params', type=str,
                       help=f'ML-DSA parameters (options: {list(param_lookup.keys())}).')
   parser.add_argument('--percentile', required=False, type=int,
-                      help=f'Percentile to target (1-99).')
+                      help=f'Percentile to target (1-99). Relies on a timing assumption that '
+                            'the time between the start of the sign loop and the first check '
+                            '(znorm) is longer than all the other checks.')
   parser.add_argument('--deterministic', required=False, action='store_true',
                       help=f'Sample deterministically instead of pseudo-randomly.')
   parser.add_argument('--verbose', required=False, action='store_true')
