@@ -82,6 +82,7 @@ def parse_rsp(rsp):
     'rnd': True,
     'pk': True,
     'sk': True,
+    'keygen_seed': True,
     'smlen': False,
     'sm': True,
     'iterlen': False,
@@ -126,7 +127,7 @@ def write_sample_json(params, sample, dst):
   for i in range(len(sample)):
     t = sample[i]
     tdata = {'test_id': i}
-    for field in ['mlen', 'msg', 'rnd', 'sk']:
+    for field in ['mlen', 'msg', 'rnd', 'sk', 'keygen_seed']:
       value = t[field]
       if isinstance(value, bytes):
         value = value.hex()
@@ -143,7 +144,7 @@ def write_sample_rsp(params, sample, dst):
   '''Write sample test vectors to a file in NIST .rsp form.'''
   for i in range(len(sample)):
     t = sample[i]
-    for field in ['mlen', 'msg', 'rnd', 'sk', 'smlen', 'sm']:
+    for field in ['mlen', 'msg', 'rnd', 'sk', 'keygen_seed', 'smlen', 'sm']:
       value = t[field]
       if isinstance(value, bytes):
         value = value.hex()
